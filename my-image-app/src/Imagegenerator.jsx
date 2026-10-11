@@ -1,4 +1,4 @@
-import {useState, useRef} from "react";
+import {useEffect, useState} from "react";
 
 export default function ImageGenerator(){
     const [prompt, setPrompt] = useState("");
@@ -8,7 +8,12 @@ export default function ImageGenerator(){
     const [imageUrl, setImageUrl] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
-    const imgRef = useRef(null);
+
+    useEffect(() => {
+        return () => {
+            if (imageUrl) URL.revokeObjectURL(imageUrl);
+        };
+    }, [imageUrl]);
 
     function buildUrl(){
         let url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
@@ -19,7 +24,7 @@ export default function ImageGenerator(){
     return url;
     }
 
-    function handleGenerate(){
+    async function handleGenerate(){
         if (!prompt.trim()) {
             setError("Type a prompt first.");
             return;
@@ -29,20 +34,74 @@ export default function ImageGenerator(){
         setImageUrl(null);
 
         const url = buildUrl();
-        const img = new Image();
-        img.onload = () => {
-            setImageUrl(url);
-            setLoading(false);
-        };
-        img.onerror = () => {
-            setError("Generation failed - try againn.");
-            setLoading(false);
-        };
-        img.src = url;
+        let failureMessage = "The image service could not be reached. Check your connection and try again.";
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            let objectUrl;
+            let timeout;
+
+            try {
+                const controller = new AbortController();
+                timeout = setTimeout(() => controller.abort(), 120000);
+                const response = await fetch(url, {signal: controller.signal});
+
+                if (!response.ok) {
+                    if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+                        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+                        continue;
+                    }
+                    throw new Error(
+                        response.status === 429
+                            ? "The image service is busy (HTTP 429)."
+                            : `The image service returned HTTP ${response.status}.`
+                    );
+                }
+
+                const contentType = response.headers.get("content-type") || "";
+                if (!contentType.startsWith("image/")) {
+                    throw new Error("The image service returned an invalid response.");
+                }
+
+                objectUrl = URL.createObjectURL(await response.blob());
+                const image = new Image();
+                image.src = objectUrl;
+                await image.decode();
+
+                setImageUrl(objectUrl);
+                objectUrl = null;
+                setLoading(false);
+                return;
+            } catch (requestError) {
+                if (objectUrl) URL.revokeObjectURL(objectUrl);
+
+                failureMessage = requestError instanceof Error
+                    ? requestError.name === "AbortError"
+                        ? "The image service timed out. Please try again."
+                        : requestError.message
+                    : "An unexpected error occurred.";
+
+                const retryable = requestError instanceof TypeError
+                    || (requestError instanceof Error
+                        && ["AbortError", "EncodingError"].includes(requestError.name));
+                if (retryable && attempt < 2) {
+                    await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+                    continue;
+                }
+                break;
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        setError(`Generation failed: ${failureMessage}`);
+        setLoading(false);
     }
 
     function handleKeyDown(e){
-        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGenerate();
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleGenerate();
+        }
     }
 
     return (
@@ -50,7 +109,7 @@ export default function ImageGenerator(){
       <div className="w-full max-w-xl bg-neutral-900 border border-neutral-800 rounded-2xl p-7">
         <h1 className="text-xl font-semibold text-neutral-100">Text → Image</h1>
         <p className="text-sm text-neutral-400 mt-1 mb-5">
-          Free, no API key required (powered by Pollinations.ai).
+          {/* Free, no API key required (powered by Pollinations.ai). */}
         </p>
  
         <textarea
@@ -121,7 +180,6 @@ export default function ImageGenerator(){
           {imageUrl && !loading && (
             <div className="w-full flex flex-col items-center">
               <img
-                ref={imgRef}
                 src={imageUrl}
                 alt={prompt}
                 className="w-full rounded-xl border border-neutral-800"
